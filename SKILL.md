@@ -8,6 +8,8 @@ homepage: https://tiktok.palmyr.ai
 
 Use `https://tiktok.palmyr.ai` for TikTok automation. Paid actions use x402 USDC payments. There are no API keys or subscriptions.
 
+This skill describes the optional hosted HTTP API. For a fully local, payment-free runtime, install the repository as an MCP server instead.
+
 ## Discover and call
 
 ```bash
@@ -59,3 +61,5 @@ TikTok actions are asynchronous. Poll `poll_url` until `done` is `true`. Never r
 | GET | `/v1/health` | free |
 
 Machine-readable contract: [OpenAPI](https://tiktok.palmyr.ai/openapi.json) and [x402 discovery](https://tiktok.palmyr.ai/.well-known/x402).
+
+Service listing: [TikTok Automation on Agentic Market](https://agentic.market/services/tiktok-palmyr-ai).

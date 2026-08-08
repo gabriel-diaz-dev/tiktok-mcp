@@ -1,16 +1,15 @@
 # TikTok MCP
 
-Post, schedule, manage, and analyze TikTok accounts from any MCP-compatible AI agent.
+Self-hosted TikTok automation for AI agents. Connect accounts, post and schedule videos, manage profiles, and track analytics through one local MCP server.
 
-- Connect accounts with secure QR login
-- Post videos now or schedule them
-- Follow users, like videos, and manage profiles
-- Track analytics, growth, and content hooks
-- No API keys or subscriptions
+- Runs the browser and automation on your device
+- Keeps TikTok sessions, media, and analytics local
+- Works with any MCP-compatible agent or CLI
+- No API keys, payments, or hosted dependency
 
 ## Quick start
 
-Run the MCP locally by adding it to your agent configuration:
+You need Node.js 18.18+ and Chrome, Edge, or Brave. Add this server to your agent's MCP configuration:
 
 ```json
 {
@@ -23,15 +22,19 @@ Run the MCP locally by adding it to your agent configuration:
 }
 ```
 
-Restart your agent, then ask:
+Restart the agent, then ask:
 
 ```text
-Connect my TikTok account.
+Connect my TikTok account as my-brand.
 ```
 
-Open the returned link and scan the QR code with the TikTok app. The account is then ready for your agent to use.
+A browser opens on your device. Sign in or scan TikTok's QR code; the agent can poll the connection while you finish. The persistent browser profile and state are stored under `~/.tiktok-mcp`.
 
-The MCP process runs on your machine and can read local media paths. TikTok actions use the hosted x402 API, so there is no API key to configure.
+If no installed browser is detected, install Playwright's Chromium once:
+
+```bash
+npx playwright install chromium
+```
 
 ## Example prompts
 
@@ -47,45 +50,40 @@ Analyze the strongest hooks from my fitness posts.
 Update my bio to "Building useful things in public."
 ```
 
-`tiktok_post` accepts a local `video_path`, and `tiktok_update_avatar` accepts a local `image_path`. Public media URLs work too.
+Local paths are supported by `tiktok_post` (`video_path`) and `tiktok_update_avatar` (`image_path`). Public media URLs and base64 inputs also work.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `tiktok_connect` | Start a QR login |
+| `tiktok_connect` | Open a local browser for TikTok login |
 | `tiktok_connect_status` | Check whether login completed |
-| `tiktok_accounts` | List connected accounts and session health |
-| `tiktok_post` | Post or schedule a video |
-| `tiktok_operation_status` | Poll an asynchronous action |
+| `tiktok_accounts` | List local accounts and session state |
+| `tiktok_post` | Post or natively schedule a video |
+| `tiktok_operation_status` | Poll an asynchronous browser job |
 | `tiktok_follow` | Follow a user |
 | `tiktok_like` | Like a video |
 | `tiktok_delete` | Delete a video |
 | `tiktok_update_profile` | Update a display name or bio |
 | `tiktok_update_avatar` | Update a profile image |
-| `tiktok_analytics` | Fetch post performance metrics |
+| `tiktok_analytics` | Collect and save post metrics locally |
 | `tiktok_series` | Read saved performance history and growth |
-| `tiktok_hooks` | Analyze caption hooks for an account or niche |
-| `tiktok_niches` | List available hook-analysis niches |
-| `tiktok_scheduled` | List scheduled posts |
+| `tiktok_hooks` | Analyze caption hooks from local history |
+| `tiktok_niches` | List suggested hook-analysis niches |
+| `tiktok_scheduled` | List scheduled posts recorded locally |
 | `tiktok_cancel_scheduled` | Cancel a scheduled post |
 
-## Hosted alternative
+## Hosted HTTP API
 
-If you do not want to run an MCP process locally, use the hosted x402 API directly:
+Don't want to run the browser/runtime yourself? Use the hosted x402 API at `https://tiktok.palmyr.ai/v1` with AgentCash, Agentic Market, or any x402 client. It is an HTTP API, not a remote MCP server.
 
 ```bash
 npx agentcash@latest add https://tiktok.palmyr.ai
 npx agentcash@latest discover https://tiktok.palmyr.ai
-```
-
-Inspect an endpoint before calling it:
-
-```bash
 npx agentcash@latest check https://tiktok.palmyr.ai/v1/post
 ```
 
-AgentCash handles the x402 payment automatically:
+AgentCash handles the x402 challenge and USDC payment:
 
 ```bash
 npx agentcash@latest fetch https://tiktok.palmyr.ai/v1/connect \
@@ -93,15 +91,22 @@ npx agentcash@latest fetch https://tiktok.palmyr.ai/v1/connect \
   -b '{"account_id":"my-brand"}'
 ```
 
-- [Agent skill](https://tiktok.palmyr.ai/skill.md)
+- [Hosted API skill](https://tiktok.palmyr.ai/skill.md)
 - [OpenAPI](https://tiktok.palmyr.ai/openapi.json)
+- [x402 discovery](https://tiktok.palmyr.ai/.well-known/x402)
 - [Agentic Market](https://agentic.market/services/tiktok-palmyr-ai)
 
-## Configuration
+The hosted service is optional. The local MCP never calls it.
+
+## Local configuration
 
 | Setting | Default | Description |
 |---|---|---|
-| `TIKTOK_API_URL` | `https://tiktok.palmyr.ai` | Override the TikTok API origin |
+| `TIKTOK_MCP_DATA_DIR` | `~/.tiktok-mcp` | Local profiles, job state, and analytics |
+| `TIKTOK_BROWSER_PATH` | auto-detected | Chrome-family browser executable |
+| `TIKTOK_HEADLESS` | headed on desktop | Set `true` for headless operation |
+
+Equivalent CLI flags are `--data-dir`, `--browser-path`, and `--headless`.
 
 ## Development
 

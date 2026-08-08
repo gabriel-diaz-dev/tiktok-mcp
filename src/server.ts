@@ -1,461 +1,179 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { TikTokApiClient, queryString, type ToolResult } from "./api-client.js";
-import { prepareImageInput, prepareVideoInput } from "./media.js";
+import { LocalTikTokRuntime } from "./runtime/local-runtime.js";
 
 type Shape = Record<string, z.ZodTypeAny>;
-type ToolExtra = { _meta?: Record<string, unknown> };
+type ToolResult = { isError?: boolean; content: Array<{ type: "text"; text: string }>; structuredContent?: Record<string, unknown> };
 
-const PAYMENT = z
-  .string()
-  .optional()
-  .describe("Base64 x402 payment payload. Omit on the first call to receive a payment challenge.");
+const ACCOUNT_ID = z.string().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/)
+  .describe("Local account name using letters, numbers, dots, dashes, or underscores");
 
-const ACCOUNT_ID = z.string().min(1).max(64).describe("TikTok account ID used when connecting the account");
+function requireOne(args: Record<string, unknown>, fields: string[]): void {
+  const supplied = fields.filter((field) => typeof args[field] === "string" && (args[field] as string).length > 0);
+  if (supplied.length !== 1) throw new Error(`Pass exactly one of ${fields.join(", ")}`);
+}
 
-function textError(error: unknown): ToolResult {
-  return {
-    isError: true,
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({
-          error: true,
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      },
-    ],
-  };
+function result(value: unknown): ToolResult {
+  const structured = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : { value };
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: structured };
+}
+
+function failure(error: unknown): ToolResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: true, message }) }] };
 }
 
 function addTool(
   server: McpServer,
   name: string,
   config: { title: string; description: string; inputSchema: Shape },
-  handler: (args: Record<string, any>, extra: ToolExtra) => Promise<ToolResult>,
+  handler: (args: Record<string, any>) => unknown | Promise<unknown>,
 ): void {
-  (server.registerTool as any)(
-    name,
-    config,
-    async (args: Record<string, any>, extra: ToolExtra) => {
-      try {
-        return await handler(args, extra);
-      } catch (error) {
-        return textError(error);
-      }
-    },
-  );
+  (server.registerTool as any)(name, config, async (args: Record<string, any>) => {
+    try { return result(await handler(args)); } catch (error) { return failure(error); }
+  });
 }
 
-function paymentFrom(args: Record<string, any>): { payment?: string; body: Record<string, any> } {
-  const { payment, ...body } = args;
-  return { payment, body };
-}
-
-export type TikTokServerOptions = {
-  apiUrl?: string;
-  allowLocalFiles?: boolean;
-};
+export type TikTokServerOptions = { runtime?: LocalTikTokRuntime };
 
 export function createTikTokServer(options: TikTokServerOptions = {}): McpServer {
-  const client = new TikTokApiClient(options.apiUrl);
-  const allowLocalFiles = options.allowLocalFiles ?? false;
+  const runtime = options.runtime || new LocalTikTokRuntime();
   const server = new McpServer(
-    { name: "ai.palmyr/tiktok", title: "TikTok MCP", version: "0.2.0" },
-    {
-      instructions:
-        "Connect a TikTok account first, then use its account_id for posting, scheduling, engagement, profile updates, and analytics. Paid hosted actions return an x402 challenge when called without payment.",
-    },
+    { name: "ai.palmyr/tiktok", title: "TikTok MCP", version: "0.3.0" },
+    { instructions: "Self-hosted TikTok automation. Everything runs on this device; there are no API keys, hosted calls, or payments." },
   );
 
-  const call = (
-    method: "GET" | "POST",
-    path: string,
-    body: unknown,
-    payment: string | undefined,
-    extra: ToolExtra,
-    toolName: string,
-  ) =>
-    client.call({
-      method,
-      path,
-      body,
-      payment,
-      metaPayment: extra?._meta?.["x402/payment"],
-      toolName,
-    });
+  addTool(server, "tiktok_connect", {
+    title: "Connect a TikTok account",
+    description: "Open a local browser for TikTok login/QR scan. Poll tiktok_connect_status while the owner signs in.",
+    inputSchema: {
+      account_id: ACCOUNT_ID,
+      country: z.string().length(2).optional().describe("ISO-2 country code for browser locale/timezone"),
+      tag: z.string().max(64).optional().describe("Optional account group or niche"),
+      browser_path: z.string().optional().describe("Optional Chrome/Edge/Brave executable path"),
+      timeout_seconds: z.number().int().min(30).max(900).optional(),
+    },
+  }, (args) => runtime.connect(args as any));
 
-  addTool(
-    server,
-    "tiktok_connect",
-    {
-      title: "Connect a TikTok account",
-      description:
-        "Start a secure QR login. Give the returned connect_url to the account owner, then poll tiktok_connect_status.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        country: z.string().length(2).optional().describe("Optional ISO-2 country code"),
-        tag: z.string().max(64).optional().describe("Optional label for grouping accounts"),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call("POST", "/v1/connect", body, payment, extra, "tiktok_connect");
-    },
-  );
+  addTool(server, "tiktok_connect_status", {
+    title: "Check TikTok connection",
+    description: "Check whether the local browser login completed.",
+    inputSchema: { token: z.string().min(1) },
+  }, ({ token }) => runtime.connectStatus(token));
 
-  addTool(
-    server,
-    "tiktok_connect_status",
-    {
-      title: "Check TikTok connection",
-      description: "Check whether a QR login has completed.",
-      inputSchema: {
-        token: z.string().min(1).describe("Token returned by tiktok_connect"),
-      },
-    },
-    async ({ token }, extra) =>
-      call(
-        "GET",
-        `/v1/connect/${encodeURIComponent(token)}`,
-        undefined,
-        undefined,
-        extra,
-        "tiktok_connect_status",
-      ),
-  );
+  addTool(server, "tiktok_accounts", {
+    title: "List TikTok accounts",
+    description: "List local persistent TikTok profiles and their session state.",
+    inputSchema: { tag: z.string().optional() },
+  }, ({ tag }) => runtime.accounts(tag));
 
-  addTool(
-    server,
-    "tiktok_accounts",
-    {
-      title: "List TikTok accounts",
-      description: "List connected accounts and their current session health.",
-      inputSchema: {
-        tag: z.string().optional(),
-        payment: PAYMENT,
-      },
+  addTool(server, "tiktok_post", {
+    title: "Post or schedule a TikTok video",
+    description: "Publish a local video through the connected browser profile, or use TikTok's native scheduler.",
+    inputSchema: {
+      account_id: ACCOUNT_ID,
+      caption: z.string().min(1).max(2200),
+      video_path: z.string().optional().describe("Local MP4 path; the file stays on this device"),
+      video_url: z.string().url().optional(),
+      video_base64: z.string().optional(),
+      privacy: z.number().int().min(0).max(2).optional(),
+      allow_comments: z.boolean().optional(),
+      allow_duet: z.boolean().optional(),
+      allow_stitch: z.boolean().optional(),
+      schedule_at: z.string().optional().describe("ISO-8601 time, roughly 15 minutes to 10 days ahead"),
     },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call(
-        "GET",
-        `/v1/accounts${queryString({ tag: body.tag })}`,
-        undefined,
-        payment,
-        extra,
-        "tiktok_accounts",
-      );
-    },
-  );
+  }, (args) => {
+    requireOne(args, ["video_path", "video_url", "video_base64"]);
+    return runtime.post(args);
+  });
 
-  const postInput: Shape = {
-    account_id: ACCOUNT_ID,
-    caption: z.string().max(2200),
-    video_url: z.string().url().optional().describe("Public URL of the video"),
-    video_base64: z.string().optional().describe("Base64-encoded video"),
-    ...(allowLocalFiles
-      ? { video_path: z.string().optional().describe("Local video path; available in stdio mode") }
-      : {}),
-    privacy: z.number().int().min(0).max(2).optional().describe("0 public, 1 friends, 2 private"),
-    allow_comments: z.boolean().optional(),
-    allow_duet: z.boolean().optional(),
-    allow_stitch: z.boolean().optional(),
-    schedule_at: z
-      .string()
-      .optional()
-      .describe("ISO-8601 publish time, approximately 15 minutes to 10 days ahead"),
-    payment: PAYMENT,
-  };
+  addTool(server, "tiktok_operation_status", {
+    title: "Check TikTok operation",
+    description: "Poll a local browser job until done or failed.",
+    inputSchema: { operation_id: z.string().min(1) },
+  }, ({ operation_id }) => runtime.operationStatus(operation_id));
 
-  addTool(
-    server,
-    "tiktok_post",
-    {
-      title: "Post or schedule a TikTok video",
-      description:
-        "Publish a video immediately or schedule it with TikTok's native scheduler. Returns an operation to poll.",
-      inputSchema: postInput,
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      const prepared = await prepareVideoInput(body);
-      return call("POST", "/v1/post", prepared, payment, extra, "tiktok_post");
-    },
-  );
+  addTool(server, "tiktok_follow", {
+    title: "Follow a TikTok user",
+    description: "Follow a user from a connected local profile.",
+    inputSchema: { account_id: ACCOUNT_ID, target_user: z.string().min(1) },
+  }, (args) => runtime.follow(args as any));
 
-  addTool(
-    server,
-    "tiktok_operation_status",
-    {
-      title: "Check TikTok operation",
-      description: "Poll a posting, engagement, profile, analytics, or cancellation operation.",
-      inputSchema: {
-        operation_id: z.string().min(1),
-      },
-    },
-    async ({ operation_id }, extra) =>
-      call(
-        "GET",
-        `/v1/operations/${encodeURIComponent(operation_id)}`,
-        undefined,
-        undefined,
-        extra,
-        "tiktok_operation_status",
-      ),
-  );
+  addTool(server, "tiktok_like", {
+    title: "Like a TikTok video",
+    description: "Like a video from a connected local profile.",
+    inputSchema: { account_id: ACCOUNT_ID, video_url: z.string().url() },
+  }, (args) => runtime.like(args as any));
 
-  addTool(
-    server,
-    "tiktok_follow",
-    {
-      title: "Follow a TikTok user",
-      description: "Follow a user from a connected account. Returns an operation to poll.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        target_user: z.string().min(1).describe("TikTok handle, with or without @"),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call("POST", "/v1/follow", body, payment, extra, "tiktok_follow");
-    },
-  );
+  addTool(server, "tiktok_delete", {
+    title: "Delete a TikTok video",
+    description: "Delete one of the connected account's videos.",
+    inputSchema: { account_id: ACCOUNT_ID, video_url: z.string().url() },
+  }, (args) => runtime.delete(args as any));
 
-  addTool(
-    server,
-    "tiktok_like",
-    {
-      title: "Like a TikTok video",
-      description: "Like a video from a connected account. Returns an operation to poll.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        video_url: z.string().url(),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call("POST", "/v1/like", body, payment, extra, "tiktok_like");
-    },
-  );
+  addTool(server, "tiktok_update_profile", {
+    title: "Update a TikTok profile",
+    description: "Update the display name, bio, or both through the local browser.",
+    inputSchema: { account_id: ACCOUNT_ID, display_name: z.string().max(30).optional(), bio: z.string().max(80).optional() },
+  }, (args) => {
+    if (args.display_name === undefined && args.bio === undefined) throw new Error("Pass display_name, bio, or both");
+    return runtime.profile(args as any);
+  });
 
-  addTool(
-    server,
-    "tiktok_delete",
-    {
-      title: "Delete a TikTok video",
-      description: "Delete a video from a connected account. Returns an operation to poll.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        video_url: z.string().url(),
-        payment: PAYMENT,
-      },
+  addTool(server, "tiktok_update_avatar", {
+    title: "Update a TikTok avatar",
+    description: "Set the profile image using a local path, URL, or base64 input.",
+    inputSchema: {
+      account_id: ACCOUNT_ID,
+      image_path: z.string().optional().describe("Local image path; the file stays on this device"),
+      image_url: z.string().url().optional(),
+      image_base64: z.string().optional(),
     },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call("POST", "/v1/delete", body, payment, extra, "tiktok_delete");
-    },
-  );
+  }, (args) => {
+    requireOne(args, ["image_path", "image_url", "image_base64"]);
+    return runtime.avatar(args);
+  });
 
-  addTool(
-    server,
-    "tiktok_update_profile",
-    {
-      title: "Update a TikTok profile",
-      description: "Update the display name, bio, or both. Returns an operation to poll.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        display_name: z.string().max(30).optional(),
-        bio: z.string().max(80).optional(),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      if (body.display_name === undefined && body.bio === undefined) {
-        throw new Error("Pass display_name, bio, or both");
-      }
-      return call(
-        "POST",
-        "/v1/profile",
-        body,
-        payment,
-        extra,
-        "tiktok_update_profile",
-      );
-    },
-  );
+  addTool(server, "tiktok_analytics", {
+    title: "Fetch TikTok analytics",
+    description: "Scrape post metrics locally and save a time-series sample.",
+    inputSchema: { account_id: ACCOUNT_ID },
+  }, (args) => runtime.analytics(args as any));
 
-  const avatarInput: Shape = {
-    account_id: ACCOUNT_ID,
-    image_url: z.string().url().optional(),
-    image_base64: z.string().optional(),
-    ...(allowLocalFiles
-      ? { image_path: z.string().optional().describe("Local image path; available in stdio mode") }
-      : {}),
-    payment: PAYMENT,
-  };
+  addTool(server, "tiktok_series", {
+    title: "Read TikTok performance history",
+    description: "Read analytics stored on this device or calculate growth over a time window.",
+    inputSchema: { account_id: ACCOUNT_ID, video_id: z.string().optional(), hours: z.number().positive().optional() },
+  }, (args) => runtime.series(args as any));
 
-  addTool(
-    server,
-    "tiktok_update_avatar",
-    {
-      title: "Update a TikTok avatar",
-      description: "Set the profile image for a connected account. Returns an operation to poll.",
-      inputSchema: avatarInput,
+  addTool(server, "tiktok_hooks", {
+    title: "Analyze TikTok hooks",
+    description: "Compare caption openings against mature posts stored locally.",
+    inputSchema: {
+      account_id: z.string().optional(), tag: z.string().optional(), niche: z.string().optional(),
+      caption: z.string().optional(), maturity_days: z.number().positive().optional(), recency_days: z.number().positive().optional(),
     },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      const prepared = await prepareImageInput(body);
-      return call(
-        "POST",
-        "/v1/avatar",
-        prepared,
-        payment,
-        extra,
-        "tiktok_update_avatar",
-      );
-    },
-  );
+  }, (args) => runtime.hooks(args));
 
-  addTool(
-    server,
-    "tiktok_analytics",
-    {
-      title: "Fetch TikTok analytics",
-      description: "Fetch per-post views, likes, comments, and shares and save a time-series sample.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call("POST", "/v1/analytics", body, payment, extra, "tiktok_analytics");
-    },
-  );
+  addTool(server, "tiktok_niches", {
+    title: "List TikTok niches",
+    description: "List suggested account tags for local hook analysis.",
+    inputSchema: {},
+  }, () => runtime.niches());
 
-  addTool(
-    server,
-    "tiktok_series",
-    {
-      title: "Read TikTok performance history",
-      description: "Read saved analytics samples or calculate growth over a time window.",
-      inputSchema: {
-        account_id: ACCOUNT_ID,
-        video_id: z.string().optional(),
-        hours: z.number().positive().optional(),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call(
-        "GET",
-        `/v1/series${queryString(body)}`,
-        undefined,
-        payment,
-        extra,
-        "tiktok_series",
-      );
-    },
-  );
+  addTool(server, "tiktok_scheduled", {
+    title: "List scheduled TikTok posts",
+    description: "List native scheduled posts recorded by this local MCP.",
+    inputSchema: { account_id: z.string().optional(), include_done: z.boolean().optional() },
+  }, (args) => runtime.scheduled(args));
 
-  addTool(
-    server,
-    "tiktok_hooks",
-    {
-      title: "Analyze TikTok hooks",
-      description:
-        "Find caption openings associated with stronger views for an account, account tag, or TikTok niche.",
-      inputSchema: {
-        account_id: z.string().optional(),
-        tag: z.string().optional(),
-        niche: z.string().optional(),
-        caption: z.string().optional().describe("Optional draft caption to evaluate"),
-        maturity_days: z.number().positive().optional(),
-        recency_days: z.number().positive().optional(),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call(
-        "GET",
-        `/v1/hooks${queryString(body)}`,
-        undefined,
-        payment,
-        extra,
-        "tiktok_hooks",
-      );
-    },
-  );
-
-  addTool(
-    server,
-    "tiktok_niches",
-    {
-      title: "List TikTok niches",
-      description: "List the niches available to tiktok_hooks.",
-      inputSchema: {},
-    },
-    async (_args, extra) =>
-      call("GET", "/v1/niches", undefined, undefined, extra, "tiktok_niches"),
-  );
-
-  addTool(
-    server,
-    "tiktok_scheduled",
-    {
-      title: "List scheduled TikTok posts",
-      description: "List pending and completed posts created through tiktok_post.",
-      inputSchema: {
-        account_id: z.string().optional(),
-        include_done: z.boolean().optional(),
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      return call(
-        "GET",
-        `/v1/scheduled${queryString(body)}`,
-        undefined,
-        payment,
-        extra,
-        "tiktok_scheduled",
-      );
-    },
-  );
-
-  addTool(
-    server,
-    "tiktok_cancel_scheduled",
-    {
-      title: "Cancel a scheduled TikTok post",
-      description: "Cancel a scheduled post by deleting its held TikTok video. Returns an operation to poll.",
-      inputSchema: {
-        operation_id: z.string().min(1),
-        account_id: ACCOUNT_ID,
-        payment: PAYMENT,
-      },
-    },
-    async (args, extra) => {
-      const { payment, body } = paymentFrom(args);
-      const { operation_id, ...requestBody } = body;
-      return call(
-        "POST",
-        `/v1/scheduled/${encodeURIComponent(operation_id)}/cancel`,
-        requestBody,
-        payment,
-        extra,
-        "tiktok_cancel_scheduled",
-      );
-    },
-  );
+  addTool(server, "tiktok_cancel_scheduled", {
+    title: "Cancel a scheduled TikTok post",
+    description: "Cancel a native scheduled post by deleting its held video.",
+    inputSchema: { operation_id: z.string().min(1), account_id: ACCOUNT_ID },
+  }, ({ operation_id, account_id }) => runtime.cancelScheduled(operation_id, account_id));
 
   return server;
 }
