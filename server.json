@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.palmyr/tiktok",
+  "title": "TikTok MCP",
+  "description": "Post, schedule, manage, and analyze TikTok accounts from any MCP-compatible AI agent.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/0xArtex/tiktok-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@palmyr/tiktok-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
