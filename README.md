@@ -17,7 +17,7 @@ Add this to your MCP configuration:
   "mcpServers": {
     "tiktok": {
       "command": "npx",
-      "args": ["-y", "@palmyr/tiktok-mcp@latest"]
+      "args": ["-y", "github:0xArtex/tiktok-mcp"]
     }
   }
 }
@@ -73,7 +73,7 @@ When the MCP runs locally over stdio, `tiktok_post` accepts a local `video_path`
 The same server can run as a remote Streamable HTTP MCP:
 
 ```bash
-npx -y @palmyr/tiktok-mcp@latest --http --port 3000
+npx -y github:0xArtex/tiktok-mcp --http --port 3000
 ```
 
 The MCP endpoint is available at `http://localhost:3000/mcp`. The public hosted endpoint will be added here when its DNS and deployment are live.
@@ -102,7 +102,7 @@ npx agentcash@latest discover https://your-tiktok-api.example
 Run the MCP over stdio:
 
 ```bash
-npx -y @palmyr/tiktok-mcp@latest
+npx -y github:0xArtex/tiktok-mcp
 ```
 
 ## Development
