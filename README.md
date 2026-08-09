@@ -1,4 +1,4 @@
-<h1><img src="assets/tiktok-logo.png" alt="TikTok" width="28" align="middle"> TikTok MCP</h1>
+<h1><sub><img src="assets/tiktok-logo.png" alt="TikTok" width="28"></sub>&ensp;TikTok MCP</h1>
 
 ![TikTok MCP examples](assets/tiktok-mcp-examples.png)
 
