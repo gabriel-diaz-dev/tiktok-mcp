@@ -6,9 +6,7 @@ homepage: https://tiktok.palmyr.ai
 
 # TikTok Automation API
 
-Use `https://tiktok.palmyr.ai` for TikTok automation. Paid actions use x402 USDC payments. There are no API keys or subscriptions.
-
-This skill describes the optional hosted HTTP API. For a fully local, payment-free runtime, install the repository as an MCP server instead.
+This skill describes the hosted TikTok automation API(`https://tiktok.palmyr.ai`). For a fully local option, install the repository as an MCP server instead.
 
 ## Discover and call
 
@@ -40,25 +38,27 @@ TikTok actions are asynchronous. Poll `poll_url` until `done` is `true`. Never r
 
 ## Endpoints
 
-| Method | Path | Price |
-|---|---|---:|
-| POST | `/v1/connect` | $0.01 |
-| GET | `/v1/connect/:token` | free |
-| GET | `/v1/accounts` | $0.001 |
-| POST | `/v1/post` | $0.01 |
-| GET | `/v1/operations/:id` | free |
-| POST | `/v1/follow` | $0.001 |
-| POST | `/v1/like` | $0.001 |
-| POST | `/v1/delete` | $0.001 |
-| POST | `/v1/profile` | $0.001 |
-| POST | `/v1/avatar` | $0.005 |
-| POST | `/v1/analytics` | $0.005 |
-| GET | `/v1/series` | $0.001 |
-| GET | `/v1/hooks` | $0.001 account/tag, $0.05 niche |
-| GET | `/v1/niches` | free |
-| GET | `/v1/scheduled` | $0.001 |
-| POST | `/v1/scheduled/:id/cancel` | $0.001 |
-| GET | `/v1/health` | free |
+
+| Method | Path                       | Price                           |
+| ------ | -------------------------- | ------------------------------- |
+| POST   | `/v1/connect`              | $0.01                           |
+| GET    | `/v1/connect/:token`       | free                            |
+| GET    | `/v1/accounts`             | $0.001                          |
+| POST   | `/v1/post`                 | $0.01                           |
+| GET    | `/v1/operations/:id`       | free                            |
+| POST   | `/v1/follow`               | $0.001                          |
+| POST   | `/v1/like`                 | $0.001                          |
+| POST   | `/v1/delete`               | $0.001                          |
+| POST   | `/v1/profile`              | $0.001                          |
+| POST   | `/v1/avatar`               | $0.005                          |
+| POST   | `/v1/analytics`            | $0.005                          |
+| GET    | `/v1/series`               | $0.001                          |
+| GET    | `/v1/hooks`                | $0.001 account/tag, $0.05 niche |
+| GET    | `/v1/niches`               | free                            |
+| GET    | `/v1/scheduled`            | $0.001                          |
+| POST   | `/v1/scheduled/:id/cancel` | $0.001                          |
+| GET    | `/v1/health`               | free                            |
+
 
 Machine-readable contract: [OpenAPI](https://tiktok.palmyr.ai/openapi.json) and [x402 discovery](https://tiktok.palmyr.ai/.well-known/x402).
 
