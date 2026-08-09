@@ -14,6 +14,7 @@ import { checkCaption, hookReport } from "./tiktok-hooks.js";
 import { NICHES } from "./tiktok-niches.js";
 import { growthSince, latestForAccount, seriesFor } from "./tiktok-metrics.js";
 import { launchLocalContext } from "./social-runtime.js";
+import { LOCATION_GUIDANCE, QrRelayClient, type QrRelaySession } from "./qr-relay.js";
 import {
   getAccount,
   getOperation,
@@ -34,6 +35,7 @@ function safeInput(input: Record<string, unknown>): Record<string, unknown> {
 }
 
 function operationView(operation: LocalOperation) {
+  const connectUrl = operation.name === "connect" ? (operation.result as any)?.connect_url : undefined;
   return {
     operation_id: operation.id,
     operation: operation.name,
@@ -45,11 +47,41 @@ function operationView(operation: LocalOperation) {
     error_code: operation.error_code,
     created_at: operation.created_at,
     updated_at: operation.updated_at,
+    ...(connectUrl ? { connect_url: connectUrl, location_guidance: LOCATION_GUIDANCE } : {}),
   };
 }
 
+type ConnectInput = {
+  account_id: string;
+  country?: string;
+  tag?: string;
+  browser_path?: string;
+  timeout_seconds?: number;
+};
+
+async function extractQr(page: any): Promise<string | null> {
+  const canvas: string = await page.evaluate(
+    `(() => {
+      const c = document.querySelector('[data-e2e="qr-code"] canvas') || document.querySelector('canvas');
+      if (!c || !c.width) return '';
+      try { return c.toDataURL('image/png'); } catch (error) { return ''; }
+    })()`,
+  ).catch(() => "");
+  if (canvas.startsWith("data:image")) return canvas;
+  try {
+    const element = page.locator('[data-e2e="qr-code"], canvas').first();
+    if (await element.isVisible({ timeout: 2_000 }).catch(() => false)) {
+      return `data:image/png;base64,${(await element.screenshot({ timeout: 5_000 })).toString("base64")}`;
+    }
+  } catch { /* the QR has not rendered yet */ }
+  return null;
+}
+
 export class LocalTikTokRuntime {
-  connect(input: { account_id: string; country?: string; tag?: string; browser_path?: string; timeout_seconds?: number }) {
+  constructor(private readonly qrRelay = new QrRelayClient()) {}
+
+  async connect(input: ConnectInput) {
+    const relay = await this.qrRelay.create();
     const id = randomUUID();
     const now = new Date().toISOString();
     const operation: LocalOperation = {
@@ -58,24 +90,28 @@ export class LocalTikTokRuntime {
       account_id: input.account_id,
       status: "pending",
       input: safeInput(input),
+      result: { connect_url: relay.connect_url },
       created_at: now,
       updated_at: now,
     };
     putOperation(operation);
     upsertAccount({ id: input.account_id, country: input.country, tag: input.tag, status: "connecting" });
-    void this.runConnect(operation, input);
+    void this.runConnect(operation, input, relay);
     return {
       token: id,
       operation_id: id,
+      connect_url: relay.connect_url,
+      expires_in_sec: relay.expires_in_sec,
       status: "pending",
-      browser_opening: true,
-      message: "A local browser window is opening. Log in or scan TikTok's QR code, then poll tiktok_connect_status.",
+      message: "Send connect_url to the human. They open it, scan the live TikTok QR, and confirm login while the agent polls tiktok_connect_status.",
+      location_guidance: LOCATION_GUIDANCE,
     };
   }
 
   private async runConnect(
     operation: LocalOperation,
-    input: { account_id: string; country?: string; tag?: string; browser_path?: string; timeout_seconds?: number },
+    input: ConnectInput,
+    relay: QrRelaySession,
   ): Promise<void> {
     operation.status = "running";
     operation.updated_at = new Date().toISOString();
@@ -88,18 +124,34 @@ export class LocalTikTokRuntime {
         headless: false,
         loadMedia: true,
         browserPath: input.browser_path,
+        background: true,
       });
       await session.page.goto("https://www.tiktok.com/login/qrcode", { waitUntil: "domcontentloaded", timeout: 60_000 });
       const deadline = Date.now() + Math.min(Math.max(input.timeout_seconds || 300, 30), 900) * 1000;
       let authenticated = false;
+      let lastQr: string | null = null;
       while (Date.now() < deadline) {
         const cookies = await session.ctx.cookies("https://www.tiktok.com");
         authenticated = cookies.some((cookie) => cookie.name === "sessionid" && cookie.value.length > 10);
         if (authenticated) break;
         if (session.page.isClosed()) throw new Error("The login browser was closed before TikTok connected");
-        await session.page.waitForTimeout(1_000);
+        const refusal = String(await session.page.evaluate(
+          `(() => {
+            const text = (document.body && document.body.innerText) || '';
+            const match = text.match(/[^\\n]*(couldn'?t log ?in|could not log ?in|try another login method|too many attempts|something went wrong)[^\\n]*/i);
+            return match ? match[0].trim().slice(0, 200) : '';
+          })()`,
+        ).catch(() => ""));
+        if (refusal) throw new Error(`TikTok refused the QR login: ${refusal}. ${LOCATION_GUIDANCE}`);
+        const qr = await extractQr(session.page);
+        if (qr && qr !== lastQr) {
+          await this.qrRelay.update(relay.writer, qr);
+          lastQr = qr;
+        }
+        await session.page.waitForTimeout(2_000);
       }
       if (!authenticated) throw new Error("TikTok login timed out before a session was detected");
+      await this.qrRelay.complete(relay.writer).catch(() => {});
       const connectedAt = new Date().toISOString();
       upsertAccount({
         id: input.account_id,
@@ -110,7 +162,7 @@ export class LocalTikTokRuntime {
         last_error: undefined,
       });
       operation.status = "done";
-      operation.result = { connected: true, account_id: input.account_id };
+      operation.result = { connected: true, account_id: input.account_id, connect_url: relay.connect_url };
       operation.updated_at = connectedAt;
       putOperation(operation);
     } catch (error) {

@@ -3,7 +3,7 @@
   "name": "ai.palmyr/tiktok",
   "title": "TikTok MCP",
   "description": "Self-hosted TikTok browser automation for MCP-compatible AI agents.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "repository": {
     "url": "https://github.com/0xArtex/tiktok-mcp",
     "source": "github"
@@ -12,7 +12,7 @@
     {
       "registryType": "npm",
       "identifier": "@palmyr/tiktok-mcp",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "transport": {
         "type": "stdio"
       }

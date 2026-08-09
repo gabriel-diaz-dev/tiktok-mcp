@@ -41,16 +41,16 @@ export type TikTokServerOptions = { runtime?: LocalTikTokRuntime };
 export function createTikTokServer(options: TikTokServerOptions = {}): McpServer {
   const runtime = options.runtime || new LocalTikTokRuntime();
   const server = new McpServer(
-    { name: "ai.palmyr/tiktok", title: "TikTok MCP", version: "0.3.0" },
-    { instructions: "Self-hosted TikTok automation. Everything runs on this device; there are no API keys, hosted calls, or payments." },
+    { name: "ai.palmyr/tiktok", title: "TikTok MCP", version: "0.3.1" },
+    { instructions: "Self-hosted TikTok automation. Browser profiles, actions, media, and analytics stay on this device. Connect uses a free ephemeral QR relay so a remote human can scan a shareable link; there are no API keys or payments." },
   );
 
   addTool(server, "tiktok_connect", {
     title: "Connect a TikTok account",
-    description: "Open a local browser for TikTok login/QR scan. Poll tiktok_connect_status while the owner signs in.",
+    description: "Create a shareable TikTok QR login link. Send connect_url to the human and poll tiktok_connect_status while they scan it.",
     inputSchema: {
       account_id: ACCOUNT_ID,
-      country: z.string().length(2).optional().describe("ISO-2 country code for browser locale/timezone"),
+      country: z.string().length(2).optional().describe("ISO-2 country of the VPS/browser exit; keep it close to the scanning human and the account's usual region"),
       tag: z.string().max(64).optional().describe("Optional account group or niche"),
       browser_path: z.string().optional().describe("Optional Chrome/Edge/Brave executable path"),
       timeout_seconds: z.number().int().min(30).max(900).optional(),

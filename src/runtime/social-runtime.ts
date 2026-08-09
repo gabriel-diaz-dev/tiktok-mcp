@@ -1,6 +1,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
 import { profileDir } from "./store.js";
 
 interface CountryProfile { locale: string; timezoneId: string }
@@ -84,6 +85,34 @@ function installedBrowser(): string | undefined {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
+type VirtualDisplay = { display: string; process: ChildProcess };
+
+async function startVirtualDisplay(): Promise<VirtualDisplay> {
+  const executable = ["/usr/bin/Xvfb", "/usr/local/bin/Xvfb"].find((candidate) => existsSync(candidate));
+  if (!executable) {
+    throw new Error(
+      "TikTok QR login needs a headed browser. This Linux host has no DISPLAY or Xvfb; install it with `sudo apt-get install -y xvfb`.",
+    );
+  }
+  const number = Array.from({ length: 40 }, (_, index) => 90 + index)
+    .find((candidate) => !existsSync(`/tmp/.X11-unix/X${candidate}`));
+  if (number === undefined) throw new Error("No free Xvfb display is available for TikTok QR login");
+  const display = `:${number}`;
+  const child = spawn(executable, [display, "-screen", "0", "1440x900x24", "-nolisten", "tcp"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  let spawnError: Error | undefined;
+  child.once("error", (error) => { spawnError = error; });
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if (existsSync(`/tmp/.X11-unix/X${number}`)) return { display, process: child };
+    if (spawnError || child.exitCode !== null) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  child.kill();
+  throw new Error(`Xvfb did not start for TikTok QR login${spawnError ? `: ${spawnError.message}` : ""}`);
+}
+
 export interface LaunchLocalContextOptions {
   accountId: string;
   country?: string;
@@ -91,6 +120,8 @@ export interface LaunchLocalContextOptions {
   headless?: boolean;
   loadMedia?: boolean;
   browserPath?: string;
+  /** Keep a headed login browser out of the operator's way; VPSes use Xvfb. */
+  background?: boolean;
 }
 
 export interface LocalContext {
@@ -103,13 +134,28 @@ export interface LocalContext {
 export async function launchLocalContext(opts: LaunchLocalContextOptions): Promise<LocalContext> {
   const release = await lockAccount(opts.accountId);
   const profile = profileForCountry(opts.country);
+  const headless = opts.headless ?? defaultHeadless();
+  let virtualDisplay: VirtualDisplay | undefined;
+  if (!headless && process.platform === "linux" && !process.env.DISPLAY) {
+    try { virtualDisplay = await startVirtualDisplay(); }
+    catch (error) { release(); throw error; }
+  }
   const launchOptions: any = {
-    headless: opts.headless ?? defaultHeadless(),
+    headless,
     locale: profile.locale,
     timezoneId: profile.timezoneId,
     viewport: { width: 1440, height: 900 },
-    args: ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
+    args: [
+      "--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check",
+      ...(opts.background && !virtualDisplay ? ["--start-minimized"] : []),
+    ],
   };
+  if (virtualDisplay) {
+    launchOptions.env = {
+      ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+      DISPLAY: virtualDisplay.display,
+    };
+  }
   const browserPath = opts.browserPath || process.env.TIKTOK_BROWSER_PATH || installedBrowser();
   if (browserPath) launchOptions.executablePath = browserPath;
   else if (process.env.TIKTOK_BROWSER_CHANNEL) launchOptions.channel = process.env.TIKTOK_BROWSER_CHANNEL;
@@ -118,6 +164,7 @@ export async function launchLocalContext(opts: LaunchLocalContextOptions): Promi
   try {
     ctx = await chromium.launchPersistentContext(profileDir(opts.accountId), launchOptions);
   } catch (error) {
+    virtualDisplay?.process.kill();
     release();
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -144,11 +191,15 @@ export async function launchLocalContext(opts: LaunchLocalContextOptions): Promi
       close: async () => {
         if (closed) return;
         closed = true;
-        try { await ctx.close(); } finally { release(); }
+        try { await ctx.close(); } finally {
+          virtualDisplay?.process.kill();
+          release();
+        }
       },
     };
   } catch (error) {
     await ctx.close().catch(() => {});
+    virtualDisplay?.process.kill();
     release();
     throw error;
   }

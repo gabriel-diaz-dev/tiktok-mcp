@@ -3,9 +3,9 @@
 Self-hosted TikTok automation for AI agents. Connect accounts, post and schedule videos, manage profiles, and track analytics through one local MCP server.
 
 - Runs the browser and automation on your device
-- Keeps TikTok sessions, media, and analytics local
+- Keeps TikTok sessions, media, browser profiles, and analytics local
 - Works with any MCP-compatible agent or CLI
-- No API keys, payments, or hosted dependency
+- No API keys or payments
 
 ## Quick start
 
@@ -28,12 +28,22 @@ Restart the agent, then ask:
 Connect my TikTok account as my-brand.
 ```
 
-A browser opens on your device. Sign in or scan TikTok's QR code; the agent can poll the connection while you finish. The persistent browser profile and state are stored under `~/.tiktok-mcp`.
+The MCP returns a shareable `connect_url`. Send it to the human who owns the account; they open it, scan the live TikTok QR, and confirm login while the agent polls the connection. This works when the agent runs on a different VPS or machine.
+
+The login browser and persistent profile remain on the agent machine. Only the short-lived, rotating QR image is relayed through `tiktok.palmyr.ai`; cookies and account sessions never leave the local runtime. State is stored under `~/.tiktok-mcp`.
+
+> **Location matters:** the VPS/browser exit and the human's phone should be in the same country or a nearby region, ideally the account's usual region. TikTok may refuse geographically distant QR logins. If they differ, align the VPS/browser exit first; otherwise the human can temporarily use an allowed VPN/proxy while scanning. Keep the runtime exit stable afterward and follow TikTok's Terms.
 
 If no installed browser is detected, install Playwright's Chromium once:
 
 ```bash
 npx playwright install chromium
+```
+
+On a Linux VPS without a desktop display, install Xvfb so TikTok receives a headed browser while the human uses the remote link:
+
+```bash
+sudo apt-get install -y xvfb
 ```
 
 ## Example prompts
@@ -56,7 +66,7 @@ Local paths are supported by `tiktok_post` (`video_path`) and `tiktok_update_ava
 
 | Tool | What it does |
 |---|---|
-| `tiktok_connect` | Open a local browser for TikTok login |
+| `tiktok_connect` | Return a shareable QR login link |
 | `tiktok_connect_status` | Check whether login completed |
 | `tiktok_accounts` | List local accounts and session state |
 | `tiktok_post` | Post or natively schedule a video |
@@ -96,7 +106,7 @@ npx agentcash@latest fetch https://tiktok.palmyr.ai/v1/connect \
 - [x402 discovery](https://tiktok.palmyr.ai/.well-known/x402)
 - [Agentic Market](https://agentic.market/services/tiktok-palmyr-ai)
 
-The hosted service is optional. The local MCP never calls it.
+The paid hosted automation API is optional. The local MCP uses only its free, ephemeral QR relay during account connection; all TikTok browser actions and session data remain local.
 
 ## Local configuration
 
@@ -105,6 +115,7 @@ The hosted service is optional. The local MCP never calls it.
 | `TIKTOK_MCP_DATA_DIR` | `~/.tiktok-mcp` | Local profiles, job state, and analytics |
 | `TIKTOK_BROWSER_PATH` | auto-detected | Chrome-family browser executable |
 | `TIKTOK_HEADLESS` | headed on desktop | Set `true` for headless operation |
+| `TIKTOK_CONNECT_RELAY_URL` | `https://tiktok.palmyr.ai` | Ephemeral QR hand-off origin |
 
 Equivalent CLI flags are `--data-dir`, `--browser-path`, and `--headless`.
 

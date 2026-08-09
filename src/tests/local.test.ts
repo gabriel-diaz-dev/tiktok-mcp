@@ -8,6 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createTikTokServer } from "../server.js";
 import { LocalTikTokRuntime } from "../runtime/local-runtime.js";
+import { LOCATION_GUIDANCE, QrRelayClient } from "../runtime/qr-relay.js";
 import { latestForAccount, recordSample, seriesFor } from "../runtime/tiktok-metrics.js";
 import { listAccounts, upsertAccount } from "../runtime/store.js";
 
@@ -23,7 +24,7 @@ after(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-test("persists local accounts and sparse analytics without a hosted dependency", () => {
+test("persists local accounts and sparse analytics without hosted automation calls", () => {
   upsertAccount({ id: "brand", status: "active", country: "ae", tag: "fitness" });
   assert.equal(listAccounts()[0]?.id, "brand");
 
@@ -67,4 +68,28 @@ test("serves the local tools over the packaged stdio entrypoint", async () => {
   } finally {
     await client.close();
   }
+});
+
+test("creates and refreshes a split-capability QR relay session", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const relay = new QrRelayClient("http://127.0.0.1:3999", async (input, init) => {
+    assert.equal(new URL(input.toString()).pathname, "/v1/connect/relay");
+    bodies.push(JSON.parse(String(init?.body || "{}")));
+    return new Response(JSON.stringify({
+      token: "read-token",
+      writer: "read-token.private-writer",
+      connect_url: "https://tiktok.palmyr.ai/connect/read-token",
+      expires_in_sec: 900,
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  const created = await relay.create();
+  await relay.update(created.writer, "data:image/png;base64,AAAA");
+  await relay.complete(created.writer);
+  assert.equal(created.connect_url, "https://tiktok.palmyr.ai/connect/read-token");
+  assert.deepEqual(bodies, [
+    {},
+    { token: "read-token.private-writer", qr_data_url: "data:image/png;base64,AAAA" },
+    { token: "read-token.private-writer", done: true },
+  ]);
+  assert.match(LOCATION_GUIDANCE, /same country or a nearby region/i);
 });
