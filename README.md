@@ -1,15 +1,15 @@
-<h1><sub><img src="assets/tiktok-logo.png" alt="TikTok" width="28"></sub>&ensp;TikTok MCP</h1>
+#  TikTok MCP
 
-![TikTok MCP examples](assets/tiktok-mcp-examples.png)
+TikTok MCP examples
 
 Allow any AI agent to use the full TikTok interface through this self-hosted MCP. With this MCP you can:
 
-- Post and schedule videos
-- Manage profiles(PFP, Bio, etc.)
+- Post/schedule videos
+- Manage profile; pfp, display name, and bio
 - Find viral tiktok hooks
 - Track analytics from TikTok Studio
 
-Works with any MCP-compatible agent or CLI(Claude Code, Codex, Hermes Agent, etc.)
+Works with any MCP-compatible agent or CLI(Claude Code, Codex, Hermes Agent, etc.). **Maintained by [Palmyr](https://palmyr.ai/)**
 
 --
 
@@ -36,6 +36,8 @@ You can connect unlimited number of accounts. The agent will keep all TikTok ses
 | `tiktok_niches`           | List suggested hook-analysis niches       |
 | `tiktok_scheduled`        | List scheduled posts recorded locally     |
 | `tiktok_cancel_scheduled` | Cancel a scheduled post                   |
+
+
 
 
 ## Quick start
@@ -106,6 +108,8 @@ The paid hosted automation API is optional.
 | `TIKTOK_CONNECT_RELAY_URL` | `https://tiktok.palmyr.ai` | Ephemeral QR hand-off origin             |
 
 
+
+
 ## Development
 
 ```bash
@@ -114,6 +118,8 @@ cd tiktok-mcp
 npm install
 npm test
 ```
+
+
 
 ## License
 
