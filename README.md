@@ -1,6 +1,6 @@
-#  TikTok MCP
+<h1><sub><img src="assets/tiktok-logo.png" alt="TikTok" width="28"></sub>&ensp;TikTok MCP</h1>
 
-TikTok MCP examples
+![TikTok MCP examples](assets/tiktok-mcp-examples.png)
 
 Allow any AI agent to use the full TikTok interface through this self-hosted MCP. With this MCP you can:
 
