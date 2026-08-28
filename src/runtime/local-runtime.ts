@@ -4,7 +4,10 @@ import {
   deleteVideo,
   followUser,
   likeVideo,
+  listComments,
   postVideo,
+  publishComment,
+  deleteComment,
   updateAvatar,
   updateProfile,
   type TikTokOpRequest,
@@ -255,6 +258,18 @@ export class LocalTikTokRuntime {
 
   like(input: { account_id: string; video_url: string }) {
     return this.start("like", input.account_id, input, (common) => likeVideo({ ...common, ...input }));
+  }
+
+  comment(input: { account_id: string; video_url: string; comment_text: string }) {
+    return this.start("comment", input.account_id, input, (common) => publishComment({ ...common, ...input }));
+  }
+
+  commentDelete(input: { account_id: string; video_url: string; comment_text: string }) {
+    return this.start("comment_delete", input.account_id, input, (common) => deleteComment({ ...common, ...input }));
+  }
+
+  comments(input: { account_id: string; video_url: string; limit?: number }) {
+    return this.start("comments", input.account_id, input, (common) => listComments({ ...common, ...input }));
   }
 
   delete(input: { account_id: string; video_url: string }) {

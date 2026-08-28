@@ -107,6 +107,24 @@ export function createTikTokServer(options: TikTokServerOptions = {}): McpServer
     inputSchema: { account_id: ACCOUNT_ID, video_url: z.string().url() },
   }, (args) => runtime.like(args as any));
 
+  addTool(server, "tiktok_comment", {
+    title: "Comment on a TikTok video",
+    description: "Publish a comment on a video from a connected local profile.",
+    inputSchema: { account_id: ACCOUNT_ID, video_url: z.string().url(), comment_text: z.string().min(1).max(2200) },
+  }, (args) => runtime.comment(args as any));
+
+  addTool(server, "tiktok_comment_delete", {
+    title: "Delete a TikTok comment",
+    description: "Delete one of the connected account's comments on a video, matched by its text.",
+    inputSchema: { account_id: ACCOUNT_ID, video_url: z.string().url(), comment_text: z.string().min(1).max(2200) },
+  }, (args) => runtime.commentDelete(args as any));
+
+  addTool(server, "tiktok_comments", {
+    title: "List TikTok comments",
+    description: "Read a video's comment section (authors, text, likes, age) from a connected profile.",
+    inputSchema: { account_id: ACCOUNT_ID, video_url: z.string().url(), limit: z.number().int().min(1).max(200).optional() },
+  }, (args) => runtime.comments(args as any));
+
   addTool(server, "tiktok_delete", {
     title: "Delete a TikTok video",
     description: "Delete one of the connected account's videos.",

@@ -141,6 +141,18 @@ export const HYDRATION_PROBES = {
   },
 
   /**
+   * A video watch page's comment surface. Matches on the comment INPUT, an
+   * existing comment item, or the comment-count trigger — the section is only
+   * useful once one of those has actually rendered, and (like every other
+   * probe here) the whole point is that the auth-gated comment input hydrates
+   * LAST, long after the video shell has painted.
+   */
+  videoComments: {
+    label: "video-comments",
+    predicate: `!!document.querySelector('[data-e2e="comment-input"], [data-e2e^="comment-item-"], [data-e2e="comment-count"]')`,
+  },
+
+  /**
    * The Studio content manager. Resolves to 'rows' once real posts are present,
    * or 'empty' only after the list shell has been up for a long dwell with none
    * — the distinction that stops an unrendered list being reported as an account

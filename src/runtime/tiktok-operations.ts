@@ -15,7 +15,7 @@ import { openAuthenticatedSession, profileForCountry, pendingRequests } from "./
 import { fetchSsrfSafe } from "./media-fetch.js";
 import { randomUUID } from "crypto";
 import { checkRateLimit, recordAction } from "./social-rate-limit.js";
-import { resolveElement, axSnapshot, waitForHydrated, HYDRATION_PROBES } from "./social-selectors.js";
+import { resolveElement, axSnapshot, waitForHydrated, HYDRATION_PROBES, type ResolveResult } from "./social-selectors.js";
 import { wallClockInTz, pad2, type WallClock } from "./schedule-time.js";
 import { recordSample, postedAtFromVideoId } from "./tiktok-metrics.js";
 
@@ -1111,6 +1111,437 @@ export async function likeVideo(req: TikTokLikeRequest): Promise<TikTokOpResult<
     return { success: true, data: { liked: true } };
   } catch (e: any) {
     return { success: false, error: e.message || String(e), error_code: "UNKNOWN" };
+  } finally {
+    await close();
+  }
+}
+
+/* ─── Comments ─────────────────────────────────────────────────────────── */
+
+const VIDEO_PERMALINK = /^https:\/\/(www\.)?tiktok\.com\/@[A-Za-z0-9._]+\/video\/\d+/;
+const COMMENT_TEXT_MAX = 2200;
+
+export interface TikTokCommentRequest extends TikTokOpRequest {
+  video_url: string;
+  comment_text: string;
+}
+
+export interface TikTokCommentsListRequest extends TikTokOpRequest {
+  video_url: string;
+  limit?: number;
+}
+
+/**
+ * Comment-surface strategies. The section mostly renders client-side and the
+ * auth-gated input hydrates last, so (like every op here) we resolve
+ * resiliently and gate on a hydration probe before trusting absence.
+ */
+const COMMENT_INPUT_STRATEGIES = [
+  { name: "data-e2e-contenteditable", build: (p: any) => p.locator('[data-e2e="comment-input"] div[contenteditable="true"]') },
+  { name: "data-e2e-inner", build: (p: any) => p.locator('[data-e2e="comment-input"] [contenteditable="true"]') },
+  { name: "placeholder", build: (p: any) => p.locator('div[contenteditable="true"][data-placeholder*="omment" i]') },
+  { name: "data-e2e", build: (p: any) => p.locator('[data-e2e="comment-input"]') },
+  { name: "textarea", build: (p: any) => p.locator('textarea[data-e2e="comment-input"], textarea[placeholder*="omment" i]') },
+] as const;
+
+const COMMENT_POST_STRATEGIES = [
+  { name: "data-e2e", build: (p: any) => p.locator('[data-e2e="comment-post"]') },
+  { name: "role-name", build: (p: any) => p.getByRole("button", { name: /^(post|send)$/i }) },
+  { name: "text", build: (p: any) => p.locator('[data-e2e="comment-input"] ~ div button:has-text("Post"), button:has-text("Post"):visible') },
+] as const;
+
+/**
+ * The video page's comment input may sit behind a collapsed panel on narrow /
+ * one-column layouts (a "Comment" pill or the comment-count rail button opens
+ * it). Resolve the input first; if it isn't reachable, try each opener in
+ * order, re-checking after a click — a broken panel-open must never turn into
+ * a phantom "no comment input".
+ */
+async function resolveCommentInput(page: any): Promise<ResolveResult | null> {
+  const quick = await resolveElement(page, [...COMMENT_INPUT_STRATEGIES], { perStrategyMs: 2500 });
+  if (quick) return quick;
+  const openers: Array<{ name: string; build: (p: any) => any }> = [
+    { name: "comment-count", build: (p) => p.locator('[data-e2e="comment-count"]') },
+    { name: "aria-comment", build: (p) => p.locator('button[aria-label*="comment" i]') },
+    { name: "comment-pill", build: (p) => p.getByRole("button", { name: /^comment$/i }) },
+  ];
+  for (const opener of openers) {
+    const el = await resolveElement(page, [opener], { perStrategyMs: 2000 });
+    if (!el) continue;
+    await el.locator.click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+    const now = await resolveElement(page, [...COMMENT_INPUT_STRATEGIES], { perStrategyMs: 2500 });
+    if (now) return now;
+  }
+  return resolveElement(page, [...COMMENT_INPUT_STRATEGIES], { perStrategyMs: 8000 });
+}
+
+/**
+ * Wait until a comment item whose text matches `needle` is in the DOM. Returns
+ * the item's comment id (parsed from the `data-e2e="comment-item-<id>"`
+ * attribute) or null on timeout.
+ */
+async function findCommentByText(page: any, needle: string, timeoutMs = 12000): Promise<string | null> {
+  try {
+    const handle = await page.waitForFunction(
+      (n: string) => {
+        const norm = (t: string) => (t || "").replace(/\s+/g, " ").trim().toLowerCase();
+        const items = [...document.querySelectorAll('[data-e2e^="comment-item-"]')];
+        return items.find((el) => norm(el.textContent).includes(n))?.getAttribute("data-e2e") || null;
+      },
+      needle.replace(/\s+/g, " ").trim().slice(0, 60).toLowerCase(),
+      { timeout: timeoutMs, polling: 400 },
+    );
+    return (await handle.jsonValue().catch(() => null)) as string | null;
+  } catch {
+    return null;
+  }
+}
+
+export interface TikTokCommentResult { posted?: boolean; deleted?: boolean; comment_id?: string; comments?: any[]; count?: number; truncated?: boolean }
+
+async function confirmCommentAbsent(page: any, needle: string): Promise<boolean> {
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+  await page.locator('[data-e2e="comment-count"], [data-e2e^="comment-item-"]').first().waitFor({ timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(800);
+  return await page.evaluate(
+    (n: string) => {
+      const norm = (t: string) => (t || "").replace(/\s+/g, " ").trim().toLowerCase();
+      return ![...document.querySelectorAll('[data-e2e^="comment-item-"]')].some((el) => norm(el.textContent).includes(n));
+    },
+    needle,
+  ).catch(() => false);
+}
+
+/**
+ * Publish a comment on a video from a connected profile.
+ *
+ * The post button only enables once the input actually holds text, and the
+ * input is a contenteditable that TikTok's React takes over — so we type with
+ * a delay and wait for the button to be enabled before submitting. Success is
+ * confirmed by TikTok's own API envelope AND by the comment appearing in the
+ * list; a UI-only signal is never enough here.
+ */
+export async function publishComment(req: TikTokCommentRequest): Promise<TikTokOpResult<TikTokCommentResult>> {
+  const blocked = gate(req.account_id, "comment");
+  if (blocked) return blocked;
+
+  if (!VIDEO_PERMALINK.test(req.video_url || "")) {
+    return { success: false, error: "video_url must be a TikTok /video/ permalink", error_code: "INVALID_INPUT" };
+  }
+  const text = (req.comment_text || "").trim();
+  if (!text || text.length > COMMENT_TEXT_MAX) {
+    return { success: false, error: `comment_text must be 1-${COMMENT_TEXT_MAX} chars`, error_code: "INVALID_INPUT" };
+  }
+
+  let session;
+  try {
+    session = await openAuthenticatedSession({
+      accountId: req.account_id,
+      proxySessionId: req.proxy_session_id,
+      cookies: req.cookies,
+      country: req.country,
+    });
+  } catch (e: any) {
+    return { success: false, error: `Failed to open session: ${e.message}`, error_code: "LAUNCH_FAILED" };
+  }
+
+  const { page, close } = session;
+  try {
+    await page.goto(req.video_url, { waitUntil: "domcontentloaded", timeout: 45000 });
+
+    const railReady = await waitForHydrated(page, HYDRATION_PROBES.videoActions, { timeoutMs: 30000 });
+    if (!railReady) {
+      const diag = await captureUiState(page, "comment-rail-not-hydrated");
+      return {
+        success: false,
+        error: "The video page loaded but its engagement controls never rendered, so the comment input could not be reached.",
+        error_code: "NOT_READY",
+        data: diag as any,
+      };
+    }
+    if (await dismissBlockingModal(page, 6000)) console.error("[tiktok] dismissed a modal covering the comment input");
+
+    const input = await resolveCommentInput(page);
+    if (!input) {
+      const diag = await captureUiState(page, "comment-input-missing");
+      return { success: false, error: "No comment input on the video page after it rendered (selector may have rotated).", error_code: "UI_TIMEOUT", data: diag as any };
+    }
+    console.error(`[tiktok] comment input resolved via ${input.strategy}`);
+
+    await input.locator.click({ timeout: 5000 }).catch(() => {});
+    await input.locator.pressSequentially(text, { delay: 15 }).catch(async () => {
+      await page.keyboard.type(text, { delay: 15 }).catch(() => {});
+    });
+    await page.waitForTimeout(600);
+
+    const postBtn = await resolveElement(page, [...COMMENT_POST_STRATEGIES], { perStrategyMs: 6000 });
+    if (!postBtn) {
+      const diag = await captureUiState(page, "comment-post-missing");
+      return { success: false, error: "The comment Post button was not found after typing (selector may have rotated).", error_code: "UI_TIMEOUT", data: diag as any };
+    }
+    console.error(`[tiktok] comment post button resolved via ${postBtn.strategy}`);
+    if (await postBtn.locator.isDisabled().catch(() => false)) {
+      // React may need a tick to enable the button after the last keystroke.
+      await page.waitForTimeout(900);
+    }
+
+    const result = await submitAndAwaitTikTokApi(
+      page,
+      async () => { await postBtn.locator.click({ timeout: 10000 }).catch(() => {}); },
+      /\/comment\/publish(\/|\?|$)/i,
+      20000,
+    );
+
+    if (result && !result.ok) {
+      return {
+        success: false,
+        error: result.errorMessage || `HTTP ${result.status}`,
+        error_code: mapTikTokError(result.status, result.statusCode),
+      };
+    }
+
+    const commentId = await findCommentByText(page, text, 10000);
+    if (!commentId) {
+      const diag = await captureUiState(page, "comment-not-verified");
+      return {
+        success: false,
+        error: "No publish API response or visible comment confirmed the post — the comment may have been rejected (duplicate, filtered, or the UI flow rotated).",
+        error_code: "UI_TIMEOUT",
+        data: diag as any,
+      };
+    }
+
+    recordAction(req.account_id, "tiktok", "comment");
+    const idMatch = /comment-item-(\d+)/.exec(commentId);
+    console.error(`[tiktok] comment published on ${req.video_url}`);
+    return { success: true, data: { posted: true, comment_id: idMatch ? idMatch[1] : undefined } };
+  } catch (e: any) {
+    const diag = await captureUiState(page, "comment-unknown-error").catch(() => ({}));
+    return { success: false, error: e.message || String(e), error_code: "UNKNOWN", data: diag as any };
+  } finally {
+    await close();
+  }
+}
+
+/**
+ * Delete one of the connected account's comments on a video, matched by its
+ * text. The comment must be the account's own — TikTok offers no other delete
+ * path — so a matching item that turns out to be someone else's (no Delete in
+ * its menu) is reported as NOT_FOUND rather than force-clicked.
+ */
+export async function deleteComment(req: TikTokCommentRequest): Promise<TikTokOpResult<TikTokCommentResult>> {
+  const blocked = gate(req.account_id, "comment");
+  if (blocked) return blocked;
+
+  if (!VIDEO_PERMALINK.test(req.video_url || "")) {
+    return { success: false, error: "video_url must be a TikTok /video/ permalink", error_code: "INVALID_INPUT" };
+  }
+  const text = (req.comment_text || "").trim();
+  if (!text || text.length > COMMENT_TEXT_MAX) {
+    return { success: false, error: `comment_text must be 1-${COMMENT_TEXT_MAX} chars`, error_code: "INVALID_INPUT" };
+  }
+  const needle = text.replace(/\s+/g, " ").trim().slice(0, 60).toLowerCase();
+
+  let session;
+  try {
+    session = await openAuthenticatedSession({
+      accountId: req.account_id,
+      proxySessionId: req.proxy_session_id,
+      cookies: req.cookies,
+      country: req.country,
+    });
+  } catch (e: any) {
+    return { success: false, error: `Failed to open session: ${e.message}`, error_code: "LAUNCH_FAILED" };
+  }
+
+  const { page, close } = session;
+  try {
+    await page.goto(req.video_url, { waitUntil: "domcontentloaded", timeout: 45000 });
+
+    const sectionReady = await waitForHydrated(page, HYDRATION_PROBES.videoComments, { timeoutMs: 30000 });
+    if (!sectionReady) {
+      const diag = await captureUiState(page, "comment-list-not-hydrated");
+      return {
+        success: false,
+        error: "The video page loaded but its comment section never rendered, so the comment's existence could not be determined.",
+        error_code: "NOT_READY",
+        data: diag as any,
+      };
+    }
+    if (await dismissBlockingModal(page, 6000)) console.error("[tiktok] dismissed a modal covering the comment list");
+    // Surface the panel on narrow layouts so the items (and their menus) render.
+    await resolveCommentInput(page).catch(() => {});
+
+    const itemE2e = await findCommentByText(page, needle, 15000);
+    if (!itemE2e) {
+      const diag = await captureUiState(page, "delete-comment-not-found");
+      return {
+        success: false,
+        error: `No comment matching "${text.slice(0, 40)}" on this video. The account's own comments are the only deletable ones.`,
+        error_code: "NOT_FOUND",
+        data: diag as any,
+      };
+    }
+    const item = page.locator(`[data-e2e="${itemE2e}"]`).first();
+
+    // The "..." trigger (or the delete affordance itself) reveals the menu.
+    const more = await resolveElement(page, [
+      { name: "data-e2e", build: (p) => item.locator('[data-e2e="comment-menu"], [data-e2e="comment-more"], [data-e2e="comment-delete"]') },
+      { name: "aria-more", build: (p) => item.locator('button[aria-label*="more" i], [role="button"][aria-label*="more" i]') },
+      { name: "last-button", build: (p) => item.locator("button, [role='button']").last() },
+    ], { perStrategyMs: 5000 });
+    if (!more) {
+      const diag = await captureUiState(page, "delete-comment-menu-missing");
+      return { success: false, error: "The comment has no menu controls — it likely belongs to another user and cannot be deleted.", error_code: "NOT_FOUND", data: diag as any };
+    }
+    await more.locator.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(800);
+
+    const menuDelete = await resolveElement(page, [
+      { name: "data-e2e", build: (p) => p.locator('[data-e2e="delete-comment"], [data-e2e="comment-delete"]') },
+      { name: "menuitem", build: (p) => p.getByRole("menuitem", { name: /^delete$/i }) },
+      { name: "text", build: (p) => p.locator('button:has-text("Delete"):visible, [role="button"]:has-text("Delete"):visible') },
+    ], { perStrategyMs: 5000 });
+    if (!menuDelete) {
+      const diag = await captureUiState(page, "delete-comment-item-missing");
+      return { success: false, error: "Delete was not available for this comment (menu shown but no Delete item) — it is probably not this account's comment.", error_code: "NOT_FOUND", data: diag as any };
+    }
+    await menuDelete.locator.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(800);
+
+    // Confirm dialog → the LAST visible "Delete" actually performs it.
+    const confirm = page.locator('button:has-text("Delete"):visible, [role="button"]:has-text("Delete"):visible').last();
+    await confirm.click({ timeout: 6000 }).catch(() => {});
+
+    await item.waitFor({ state: "detached", timeout: 12000 }).catch(() => {});
+    const absent = await confirmCommentAbsent(page, needle);
+    if (!absent) {
+      const diag = await captureUiState(page, "delete-comment-still-present");
+      return { success: false, error: "Clicked delete but the comment still appears after reload.", error_code: "UI_TIMEOUT", data: diag as any };
+    }
+
+    recordAction(req.account_id, "tiktok", "comment");
+    const idMatch = /comment-item-(\d+)/.exec(itemE2e);
+    console.error(`[tiktok] comment deleted on ${req.video_url}`);
+    return { success: true, data: { deleted: true, comment_id: idMatch ? idMatch[1] : undefined } };
+  } catch (e: any) {
+    const diag = await captureUiState(page, "comment-delete-error").catch(() => ({}));
+    return { success: false, error: e.message || String(e), error_code: "UNKNOWN", data: diag as any };
+  } finally {
+    await close();
+  }
+}
+
+/**
+ * Read a video's comment section (authors, text, likes, relative age). This is
+ * a READ — like analytics, it is not subject to the protective caps, so it can
+ * be polled on a schedule to track engagement on news/always-on content.
+ */
+export async function listComments(req: TikTokCommentsListRequest): Promise<TikTokOpResult<TikTokCommentResult>> {
+  if (!VIDEO_PERMALINK.test(req.video_url || "")) {
+    return { success: false, error: "video_url must be a TikTok /video/ permalink", error_code: "INVALID_INPUT" };
+  }
+  const limit = Math.min(Math.max(req.limit ?? 50, 1), 200);
+
+  let session;
+  try {
+    session = await openAuthenticatedSession({
+      accountId: req.account_id,
+      proxySessionId: req.proxy_session_id,
+      cookies: req.cookies,
+      country: req.country,
+    });
+  } catch (e: any) {
+    return { success: false, error: `Failed to open session: ${e.message}`, error_code: "LAUNCH_FAILED" };
+  }
+
+  const { page, close } = session;
+  try {
+    await page.goto(req.video_url, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const sectionReady = await waitForHydrated(page, HYDRATION_PROBES.videoComments, { timeoutMs: 30000 });
+    if (!sectionReady) {
+      const diag = await captureUiState(page, "comments-read-not-hydrated");
+      return {
+        success: false,
+        error: "The video page loaded but its comment section never rendered, so no comments were read.",
+        error_code: "NOT_READY",
+        data: diag as any,
+      };
+    }
+    await resolveCommentInput(page).catch(() => {});
+    await page.waitForTimeout(1000);
+
+    // Scroll the comment list until the item count settles, so a lazy list is
+    // never reported as a short one. Same stable-two-check logic as the Studio
+    // content scroll.
+    let lastCount = -1, stable = 0, scrolls = 0;
+    const maxScrolls = 30;
+    while (scrolls < maxScrolls && stable < 2) {
+      const count = Number(await page.evaluate(`document.querySelectorAll('[data-e2e^="comment-item-"]').length`).catch(() => 0));
+      if (count === lastCount) stable++;
+      else { stable = 0; lastCount = count; }
+      if (stable >= 2) break;
+      await page.evaluate(`(() => {
+        const list = document.querySelector('[data-e2e="comment-list"]');
+        const target = list || document.querySelector('[data-e2e^="comment-item-"]')?.parentElement || document.body;
+        target.scrollTop = target.scrollHeight;
+        window.scrollTo(0, document.body.scrollHeight);
+      })()`).catch(() => {});
+      await page.waitForTimeout(1200);
+      scrolls++;
+    }
+
+    const scraped: any = await page.evaluate(`(() => {
+      const max = ${limit};
+      const items = [...document.querySelectorAll('[data-e2e^="comment-item-"]')];
+      const out = [];
+      for (const item of items) {
+        const e2e = item.getAttribute('data-e2e') || '';
+        const id = (e2e.match(/comment-item-(\\d+)/) || [])[1] || null;
+        const authorEl = item.querySelector('a[href*="/@"]');
+        const author = (authorEl ? (authorEl.textContent || '').trim() : '') || (item.querySelector('[data-e2e="comment-username"]')?.getAttribute('data-e2e') === 'comment-username' ? (item.querySelector('[data-e2e="comment-username"]')?.textContent || '').trim() : '');
+        const textEl = item.querySelector('[data-e2e="comment-text"], [data-e2e^="comment-content"]');
+        let text = textEl ? (textEl.textContent || '').trim() : '';
+        if (!text) {
+          const leaves = [...item.querySelectorAll('*')].filter((el) => el.children.length === 0).map((el) => (el.textContent || '').trim()).filter(Boolean);
+          text = leaves.length ? leaves.reduce((a, b) => (b.length > a.length ? b : a)) : '';
+        }
+        const parseNum = (t) => {
+          if (t == null) return null;
+          const m = String(t).trim().replace(/,/g, '').match(/^([\\d.]+)\\s*([KMB])?$/i);
+          if (!m) return null;
+          let n = parseFloat(m[1]); const u = (m[2] || '').toUpperCase();
+          if (u === 'K') n *= 1e3; else if (u === 'M') n *= 1e6; else if (u === 'B') n *= 1e9;
+          return Math.round(n);
+        };
+        const nums = [];
+        const times = [];
+        for (const el of item.querySelectorAll('*')) {
+          if (el.children.length !== 0) continue;
+          const t = (el.textContent || '').trim();
+          if (/^[\\d.,]+\\s*[KMB]?$/i.test(t) && t.length <= 8) nums.push(t);
+          else if (/^(just now|\\d+\\s*[smhd]|\\d+\\s*(h|min|s|d)\\s+ago|\\d+[smhd])$/i.test(t) && t.length <= 12) times.push(t);
+        }
+        out.push({ comment_id: id, author: author || null, text, likes: parseNum(nums[0] ?? null), age: times[0] || null });
+        if (out.length >= max) break;
+      }
+      const totalEl = document.querySelector('[data-e2e="comment-count"]');
+      return { comments: out, count: out.length, total_shown: items.length, total_comment_count: totalEl ? totalEl.getAttribute('data-e2e') === 'comment-count' ? (totalEl.textContent || '').trim() : null : null };
+    })()`).catch((e: any) => ({ error: String(e?.message || e) }));
+
+    if (!scraped || scraped.error || !Array.isArray(scraped.comments)) {
+      const diag = await captureUiState(page, "comments-read-failed");
+      return { success: false, error: "Could not scrape the comment section (selector may have rotated).", error_code: "UI_TIMEOUT", data: diag as any };
+    }
+    console.error(`[tiktok] scraped ${scraped.count} comments from ${req.video_url}`);
+    return {
+      success: true,
+      data: { comments: scraped.comments, count: scraped.comments.length, truncated: scrolls >= maxScrolls && stable < 2 },
+    };
+  } catch (e: any) {
+    const diag = await captureUiState(page, "comments-read-error").catch(() => ({}));
+    return { success: false, error: e.message || String(e), error_code: "UNKNOWN", data: diag as any };
   } finally {
     await close();
   }
